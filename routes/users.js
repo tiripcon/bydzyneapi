@@ -11,6 +11,7 @@ import {
   sendResetPassword,
   getResetPassword,
   resetPassword,
+  updateRequest,
 } from "../controllers/users.js";
 
 const router = express.Router();
@@ -34,5 +35,7 @@ router.post("/sendResetPassword", sendResetPassword);
 router.post("/getResetPassword", getResetPassword);
 
 router.post("/resetPassword", resetPassword);
+
+router.post("/updateRequest", updateRequest);
 
 export default router;

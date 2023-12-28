@@ -4,6 +4,6 @@ import { gets } from "../controllers/paises.js";
 
 const router = express.Router();
 
-router.get("/gets", gets);
+router.get("/:responsable", gets);
 
 export default router;

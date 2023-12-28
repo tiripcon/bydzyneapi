@@ -1,6 +1,8 @@
 import jwt from "jsonwebtoken";
 import pg from "pg";
 import { v4 as uuidv4 } from "uuid";
+import requestIP from "request-ip";
+import browser from "browser-detect";
 
 import {
   getBaseURL,
@@ -55,13 +57,15 @@ export const isAuthenticated = async (req, res) => {
 
 export const authentication = async (req, res) => {
   try {
+    const remoteIP = requestIP.getClientIp(req);
+    const deviceInfo = JSON.stringify(browser(req.headers["user-agent"]));
     const { login, password } = req.body;
     const response = await pool.query(
       `SELECT
     id, "idPerfil", identificacion, nombres, "apellidoPaterno", "apellidoMaterno", "idPais", "idCiudad", telefono, correo, password, "idResponsable"
     , activo, eliminado, fechaCreacion, responsableCreacion, fechaActualizacion, responsableActualizacion
     FROM bd_seguridad.seg_t_usuario
-    WHERE activo = '1'::"bit" AND "idPerfil" IS NOT NULL AND correo = '${login}' AND password = MD5('${password}')`
+    WHERE activo = '1'::"bit" AND eliminado = '0'::"bit" AND "idPerfil" IS NOT NULL AND correo = '${login}' AND password = MD5('${password}')`
     );
     const { rows } = response;
     if (rows.length <= 0) {
@@ -90,9 +94,13 @@ export const authentication = async (req, res) => {
         retorno: token,
       };
 
-      const responseLogin = await pool.query(`
-      UPDATE bd_seguridad.seg_t_usuariologin SET fecha = now() WHERE "idUsuario" = '${usuario}';
-    `);
+      const responseActive = await pool.query(
+        `UPDATE bd_seguridad.seg_t_usuariologin SET activo = false WHERE "idUsuario" = '${usuario}';`
+      );
+
+      const responseLogin = await pool.query(
+        `INSERT INTO bd_seguridad.seg_t_usuariologin ("idUsuario", fecha, ip, dispositivo, activo) SELECT '${usuario}' AS "idUsuario", now() AS fecha, '${remoteIP}' AS ip, '${deviceInfo}' AS dispositivo, true AS activo;`
+      );
 
       let queryPerfiles = `select id, nombres from bd_seguridad.seg_t_perfil;`;
       if (perfil === "2") {
@@ -116,7 +124,7 @@ export const authentication = async (req, res) => {
         FROM bd_seguridad.seg_t_usuario
         WHERE EXISTS (
           SELECT id FROM bd_seguridad.seg_t_usuario WHERE correo = '${login}' AND "idPerfil" IN (1, 2)
-        ) AND "idPerfil" IN (1, 2);`;
+        ) AND "idPerfil" IN (1, 2) AND id NOT IN ('1377dfd5-f7e1-408a-80ec-67b270ec23dc','4ffc0fc9-6386-4911-81cb-4fb524de7fa2');`;
       } else if (perfil === "2") {
         // Si es usuario Supervisor se obtiene solo el usuario supervisor que hacer solicitud de autenticación.
         query = `SELECT
@@ -124,7 +132,7 @@ export const authentication = async (req, res) => {
         FROM bd_seguridad.seg_t_usuario
         WHERE EXISTS (
           SELECT id FROM bd_seguridad.seg_t_usuario WHERE correo = '${login}' AND "idPerfil" IN (1, 2)
-        ) AND "idPerfil" IN (1, 2) AND id = '${usuario}';`;
+        ) AND "idPerfil" IN (1, 2) AND id = '${usuario}' AND id NOT IN ('1377dfd5-f7e1-408a-80ec-67b270ec23dc','4ffc0fc9-6386-4911-81cb-4fb524de7fa2');`;
       }
       const responseSupervisores = await pool.query(query);
       const rowsSupervisores = responseSupervisores.rows;
@@ -167,26 +175,70 @@ export const register = async (req, res) => {
     const response = await pool.query(
       `
       INSERT INTO bd_seguridad.seg_t_usuario
-      (id, "idPerfil", identificacion, nombres, "apellidoPaterno", "apellidoMaterno", "idPais", telefono, correo, password, activo, responsablecreacion, responsableactualizacion)
+      (id, "idPerfil", identificacion, nombres, "apellidoPaterno", "apellidoMaterno", "idPais", telefono, correo, password, "idResponsable", activo, eliminado, responsablecreacion, responsableactualizacion)
       SELECT '${userWithId.id}' id, 3 "idPerfil",'${userWithId.identificacion}' "identificacion", '${userWithId.nombres}' nombres, '${userWithId.apellidoPaterno}' "apellidoPaterno"
       , '${userWithId.apellidoMaterno}' "apellidoMaterno", ${userWithId.idPais} idPais, '${userWithId.telefono}' telefono
-      , '${userWithId.correo}' correo, MD5('${userWithId.password}') AS password, '0'::"bit"
+      , '${userWithId.correo}' correo, MD5('${userWithId.password}') AS password
+      , '${userWithId.idResponsable}' idResponsable
+      , '0'::"bit" activo
+      , '1'::"bit" eliminado
       , '${userWithId.identificacion}' responsablecreacion, '${userWithId.identificacion}' responsableactualizacion;
       `
     );
-    const responseLogin = await pool.query(`
-    INSERT INTO bd_seguridad.seg_t_usuariologin ("idUsuario") SELECT '${userWithId.id}' AS "idUsuario";
+
+    const responseSolicitud = await pool.query(`
+    INSERT INTO bd_seguridad.seg_t_usuariosolicitud ("idUsuario", "fechaSolicitud", "idUsuarioResponsable")
+    VALUES ('${userWithId.id}',now(),'${userWithId.idResponsable}');
     `);
+
     const responseUsuario = await pool.query(
-      `
-      SELECT
-      id, "idPerfil", identificacion, nombres, "apellidoPaterno", "apellidoMaterno", "idPais", "idCiudad", telefono, correo, password, "idResponsable"
-      , activo, eliminado, fechaCreacion, responsableCreacion, fechaActualizacion, responsableActualizacion
-      FROM bd_seguridad.seg_t_usuario
-      WHERE id = '${userWithId.id}'; 
-      `
+      `SELECT U.nombres, U."apellidoPaterno", U."apellidoMaterno", U.correo
+      , P.nombres AS "nombresResponsable", P."apellidoPaterno" AS "apellidoPaternoResponsable", P."apellidoMaterno" AS "apellidoMaternoResponsable", P.correo AS "correoResponsable"
+      FROM bd_seguridad.seg_t_usuario AS U
+      INNER JOIN bd_seguridad.seg_t_usuario AS P ON (U."idResponsable" = P.id AND P."idPerfil" IN (1, 2))
+      WHERE U.id = '${userWithId.id}'
+      AND U.activo = '0'::"bit" AND U.eliminado = '1'::"bit";`
     );
     const { rows } = responseUsuario;
+
+    // Notificar solicitud de aprobación de registro.
+    if (rows.length > 0) {
+      const cuerpoMensaje = `
+      <span><strong>BYDZYNE</strong></span><br /><br />
+Estimado/a ${rows[0].nombres} ${rows[0].apellidoPaterno} ${rows[0].apellidoMaterno},
+<br /><br />
+Gracias por registrarse en Sistema Equipo Pro.
+<br /><br />
+Su solicitud se encuentra en proceso de aprobación.
+<br /><br />
+Cualquier novedad por favor contactarse con ${rows[0].nombresResponsable} ${rows[0].apellidoPaternoResponsable} ${rows[0].apellidoMaternoResponsable}.
+<br /><br />
+Atentamente,<br />
+<span><strong>SISTEMA EQUIPO PRO</strong></span>
+      `;
+      enviar({
+        to: rows[0].correo,
+        subject: "Solicitud de Aprobación de Registro",
+        html: cuerpoMensaje,
+      });
+      const cuerpoMensajePresidente = `
+      <span><strong>BYDZYNE</strong></span><br /><br />
+Estimado/a ${rows[0].nombresResponsable} ${rows[0].apellidoPaternoResponsable} ${rows[0].apellidoMaternoResponsable},
+<br /><br />
+${rows[0].nombres} ${rows[0].apellidoPaterno} ${rows[0].apellidoMaterno} le ha enviado una solicitud de acceso.
+<br /><br />
+Para aprobar o rechazar la solicitud ingrese a <a target='_blank' href='${baseURL}'>${webSite}</a>
+<br /><br />
+Atentamente,<br />
+<span><strong>SISTEMA EQUIPO PRO</strong></span>
+      `;
+      enviar({
+        to: rows[0].correoResponsable,
+        subject: "Solicitud de Aprobación de Registro",
+        html: cuerpoMensajePresidente,
+      });
+    }
+
     const retorno = {
       estado: true,
       detalle: "Usuario registrado correctamente.",
@@ -205,7 +257,7 @@ export const register = async (req, res) => {
 export const gets = async (req, res) => {
   try {
     const { responsable } = req.params;
-    const { estado, nombres, correo, presidente } = req.query;
+    const { estado, identificacion, nombres, correo, presidente } = req.query;
     const token = req.headers.authorization.split(" ")[1];
     const { login, usuario, perfil } = jwt.verify(token, secret);
     if (responsable !== login) {
@@ -219,29 +271,40 @@ export const gets = async (req, res) => {
     if (perfil === "1") {
       // Si es Administrador se muestran todos los usuarios.
       query = `SELECT
+      (SELECT CASE WHEN COUNT(S."fechaSolicitud") = 1 THEN 1 ELSE 0 END AS total FROM bd_seguridad.seg_t_usuariosolicitud AS S WHERE S."idUsuario" = U.id AND S."fechaRespuesta" IS NULL) AS "existeSolicitudPendiente"
+      , (SELECT S."fechaRespuesta" FROM bd_seguridad.seg_t_usuariosolicitud AS S WHERE S."idUsuario" = U.id AND S."fechaRespuesta" IS NOT NULL) AS "fechaRespuesta"
+      , (SELECT S."estadoRespuesta" FROM bd_seguridad.seg_t_usuariosolicitud AS S WHERE S."idUsuario" = U.id AND S."fechaRespuesta" IS NOT NULL) AS "estadoRespuesta",
       U.id, U."idPerfil", U.identificacion, U.nombres, U."apellidoPaterno", U."apellidoMaterno", U."idPais", U."idCiudad", U.telefono, U.correo, U.password
       , U."idResponsable", R.nombres || ' ' || R."apellidoPaterno" || ' ' || R."apellidoMaterno" "nombreResponsable"
       , L.fecha AS "fechaUltimoLogin"
       , U.activo, U.eliminado, U.fechaCreacion, U.responsableCreacion, U.fechaActualizacion, U.responsableActualizacion
       FROM bd_seguridad.seg_t_usuario AS U
       LEFT JOIN bd_seguridad.seg_t_usuario AS R ON (U."idResponsable" = R.id)
-      LEFT JOIN bd_seguridad.seg_t_usuariologin AS L ON (U.id = L."idUsuario")
+      LEFT JOIN (
+        SELECT * FROM bd_seguridad.seg_t_usuariologin WHERE activo = true
+      ) AS L ON (U.id = L."idUsuario")
       WHERE EXISTS (
         SELECT id FROM bd_seguridad.seg_t_usuario WHERE correo = '${responsable}' AND "idPerfil" IN (1, 2)
-        )`;
+        ) AND U.id NOT IN ('1377dfd5-f7e1-408a-80ec-67b270ec23dc','4ffc0fc9-6386-4911-81cb-4fb524de7fa2')`;
     } else if (perfil === "2") {
       // Si es Supervisor se consultan solo los usuarios asociados.
       query = `SELECT
+      (SELECT CASE WHEN COUNT(S."fechaSolicitud") = 1 THEN 1 ELSE 0 END AS total FROM bd_seguridad.seg_t_usuariosolicitud AS S WHERE S."idUsuario" = U.id AND S."fechaRespuesta" IS NULL) AS "existeSolicitudPendiente"
+      , (SELECT S."fechaRespuesta" FROM bd_seguridad.seg_t_usuariosolicitud AS S WHERE S."idUsuario" = U.id AND S."fechaRespuesta" IS NOT NULL) AS "fechaRespuesta"
+      , (SELECT S."estadoRespuesta" FROM bd_seguridad.seg_t_usuariosolicitud AS S WHERE S."idUsuario" = U.id AND S."fechaRespuesta" IS NOT NULL) AS "estadoRespuesta",
       U.id, U."idPerfil", U.identificacion, U.nombres, U."apellidoPaterno", U."apellidoMaterno", U."idPais", U."idCiudad", U.telefono, U.correo, U.password
       , U."idResponsable", R.nombres || ' ' || R."apellidoPaterno" || ' ' || R."apellidoMaterno" "nombreResponsable"
       , L.fecha AS "fechaUltimoLogin"
       , U.activo, U.eliminado, U.fechaCreacion, U.responsableCreacion, U.fechaActualizacion, U.responsableActualizacion
       FROM bd_seguridad.seg_t_usuario AS U
       LEFT JOIN bd_seguridad.seg_t_usuario AS R ON (U."idResponsable" = R.id)
-      LEFT JOIN bd_seguridad.seg_t_usuariologin AS L ON (U.id = L."idUsuario")
+      LEFT JOIN (
+        SELECT * FROM bd_seguridad.seg_t_usuariologin WHERE activo = true
+      ) AS L ON (U.id = L."idUsuario")
       WHERE EXISTS (
         SELECT id FROM bd_seguridad.seg_t_usuario WHERE correo = '${responsable}' AND "idPerfil" IN (1, 2)
       )
+      AND U.id NOT IN ('1377dfd5-f7e1-408a-80ec-67b270ec23dc','4ffc0fc9-6386-4911-81cb-4fb524de7fa2')
       AND U."idResponsable" = '${usuario}'`;
     }
 
@@ -251,10 +314,20 @@ export const gets = async (req, res) => {
       (estado === "1" || estado === "0")
     ) {
       query += ` AND U.activo = '${estado}'`;
+    } else if (estado === "3") {
+      query += ` AND U.eliminado = '1'::"bit" AND U.id IN (SELECT "idUsuario" FROM bd_seguridad.seg_t_usuariosolicitud AS S WHERE S."fechaRespuesta" IS NULL AND "responsableRespuesta" IS NULL AND "estadoRespuesta" IS NULL)`;
     }
 
     if (nombres !== undefined && nombres !== null && nombres !== "") {
       query += ` AND CONCAT(U.nombres, ' ', U."apellidoPaterno", ' ', U."apellidoMaterno") LIKE '%${nombres}%'`;
+    }
+
+    if (
+      identificacion !== undefined &&
+      identificacion !== null &&
+      identificacion !== ""
+    ) {
+      query += ` AND U.identificacion LIKE '%${identificacion}%'`;
     }
 
     if (correo !== undefined && correo !== null && correo !== "") {
@@ -301,9 +374,12 @@ export const get = async (req, res) => {
     if (perfil === "1") {
       // Si es Administrador se obtiene el usuario.
       query = `SELECT
+      (SELECT CASE WHEN COUNT(S."fechaSolicitud") = 1 THEN 1 ELSE 0 END AS total FROM bd_seguridad.seg_t_usuariosolicitud AS S WHERE S."idUsuario" = U.id AND S."fechaRespuesta" IS NULL) AS "existeSolicitudPendiente"
+      , (SELECT S."fechaRespuesta" FROM bd_seguridad.seg_t_usuariosolicitud AS S WHERE S."idUsuario" = U.id AND S."fechaRespuesta" IS NOT NULL) AS "fechaRespuesta"
+      , (SELECT S."estadoRespuesta" FROM bd_seguridad.seg_t_usuariosolicitud AS S WHERE S."idUsuario" = U.id AND S."fechaRespuesta" IS NOT NULL) AS "estadoRespuesta",
       id, "idPerfil", identificacion, nombres, "apellidoPaterno", "apellidoMaterno", "idPais", "idCiudad", telefono, correo, password, "idResponsable"
       , activo, eliminado, fechaCreacion, responsableCreacion, fechaActualizacion, responsableActualizacion
-      FROM bd_seguridad.seg_t_usuario
+      FROM bd_seguridad.seg_t_usuario AS U
       WHERE EXISTS (
         SELECT id FROM bd_seguridad.seg_t_usuario
         WHERE correo = '${responsable}' AND "idPerfil" IN (1, 2)
@@ -312,9 +388,12 @@ export const get = async (req, res) => {
     } else if (perfil === "2") {
       // Si es Supervisor se obtiene el usuario solo si este esta asociado al supervisor que realiza la consulta.
       query = `SELECT
+      (SELECT CASE WHEN COUNT(S."fechaSolicitud") = 1 THEN 1 ELSE 0 END AS total FROM bd_seguridad.seg_t_usuariosolicitud AS S WHERE S."idUsuario" = U.id AND S."fechaRespuesta" IS NULL) AS "existeSolicitudPendiente"
+      , (SELECT S."fechaRespuesta" FROM bd_seguridad.seg_t_usuariosolicitud AS S WHERE S."idUsuario" = U.id AND S."fechaRespuesta" IS NOT NULL) AS "fechaRespuesta"
+      , (SELECT S."estadoRespuesta" FROM bd_seguridad.seg_t_usuariosolicitud AS S WHERE S."idUsuario" = U.id AND S."fechaRespuesta" IS NOT NULL) AS "estadoRespuesta",
       id, "idPerfil", identificacion, nombres, "apellidoPaterno", "apellidoMaterno", "idPais", "idCiudad", telefono, correo, password, "idResponsable"
       , activo, eliminado, fechaCreacion, responsableCreacion, fechaActualizacion, responsableActualizacion
-      FROM bd_seguridad.seg_t_usuario
+      FROM bd_seguridad.seg_t_usuario AS U
       WHERE EXISTS (
         SELECT id FROM bd_seguridad.seg_t_usuario
         WHERE correo = '${responsable}' AND "idPerfil" IN (1, 2)
@@ -359,9 +438,6 @@ export const create = async (req, res) => {
       , '${userWithId.responsable}' responsablecreacion, '${userWithId.responsable}' responsableactualizacion
       WHERE EXISTS (SELECT id FROM bd_seguridad.seg_t_usuario WHERE correo = '${userWithId.responsable}' AND "idPerfil" IN (1, 2));
       `
-    );
-    const responseLogin = await pool.query(
-      `INSERT INTO bd_seguridad.seg_t_usuariologin ("idUsuario") SELECT '${userWithId.id}' AS "idUsuario";`
     );
     let query = "";
     if (perfil === "1") {
@@ -511,6 +587,23 @@ export const update = async (req, res) => {
   }
 };
 
+const existeSolitudVigente = async (correo) => {
+  const retorno = false;
+  const query = `
+  SELECT S.id, S."idUsuario", correo, U.nombres, U."apellidoPaterno", U."apellidoMaterno", S.activo, "fechaSolicitud", "fechaVigencia"
+  FROM bd_seguridad.seg_t_usuariopwdreset S
+  INNER JOIN bd_seguridad.seg_t_usuario U ON (S."idUsuario" = U.id AND U.eliminado = '0'::"bit")
+  WHERE S."idUsuario" = (SELECT id FROM bd_seguridad.seg_t_usuario WHERE correo = '${correo}' AND eliminado = '0'::"bit") 
+  AND S.activo = '1'::"bit"
+  AND (((DATE_PART('day', "fechaVigencia"::timestamp - NOW()::timestamp) * 24 + 
+  DATE_PART('hour', "fechaVigencia"::timestamp - NOW()::timestamp)) * 60 +
+  DATE_PART('minute', "fechaVigencia"::timestamp - NOW()::timestamp)) > 0) = true;
+  `;
+  const responseSolicitudVigente = await pool.query(query);
+  const { rows } = responseSolicitudVigente;
+  return rows.length > 0;
+};
+
 export const sendResetPassword = async (req, res) => {
   try {
     const { correo, responsable } = req.body;
@@ -523,39 +616,25 @@ export const sendResetPassword = async (req, res) => {
       });
     } else {
       let query = "";
-      // 1. Desactivar anteriores solicitudes de reseteo del usuario.
-      query = `
-    UPDATE bd_seguridad.seg_t_usuariopwdreset
-    SET activo = '0'::"bit",
-    fechaactualizacion = NOW(),
-    responsableactualizacion = '${responsable}'
-    WHERE "idUsuario" = (SELECT id FROM bd_seguridad.seg_t_usuario WHERE correo = '${correo}' AND eliminado = '0'::"bit")
-    AND activo = '1'::"bit";
-    `;
-      const responseSolicitudes = await pool.query(query);
-      const { rowsSolicitudes } = responseSolicitudes;
-      // 2. Desactivar el usuario.
-      query = `
-    UPDATE bd_seguridad.seg_t_usuario
-    SET activo = '0'::"bit", fechaactualizacion = NOW(), responsableactualizacion = '${responsable}'
-    WHERE correo = '${correo}' AND activo = '1'::"bit";
-    `;
-      const responseUsuario = await pool.query(query);
-      const { rowsUsuario } = responseUsuario;
-      // 3. Insertar registro de solicitud de reseteo de contraseña.
-      query = `
-    INSERT INTO bd_seguridad.seg_t_usuariopwdreset ("idUsuario", responsablecreacion, responsableactualizacion)
-    SELECT id, '${responsable}' responsablecreacion, '${responsable}' responsableactualizacion
-    FROM bd_seguridad.seg_t_usuario WHERE correo = '${correo}'
-    AND activo = '0'::"bit";
-    `;
-      const responseSolicitud = await pool.query(query);
-      const { rowsSolicitud } = responseSolicitud;
-      //4. Obtener información para enviar notificación con el link de reseteo.
+
+      // 1. Si no existe una solicitud vigente se inserta el registro.
+      const response = await existeSolitudVigente(correo);
+      if (!response) {
+        query = `
+      INSERT INTO bd_seguridad.seg_t_usuariopwdreset ("idUsuario", responsablecreacion, responsableactualizacion)
+      SELECT id, '${responsable}' responsablecreacion, '${responsable}' responsableactualizacion
+      FROM bd_seguridad.seg_t_usuario WHERE correo = '${correo}'
+      AND eliminado = '0'::"bit";
+      `;
+        const responseSolicitud = await pool.query(query);
+        const { rowsSolicitud } = responseSolicitud;
+      }
+
+      // 2. Obtener información para enviar notificación con el link de reseteo.
       query = `
     SELECT S.id, S."idUsuario", correo, U.nombres, U."apellidoPaterno", U."apellidoMaterno", S.activo, "fechaSolicitud", "fechaVigencia"
     FROM bd_seguridad.seg_t_usuariopwdreset S
-    INNER JOIN bd_seguridad.seg_t_usuario U ON (S."idUsuario" = U.id AND U.activo = '0'::"bit")
+    INNER JOIN bd_seguridad.seg_t_usuario U ON (S."idUsuario" = U.id AND U.eliminado = '0'::"bit")
     WHERE S."idUsuario" = (SELECT id FROM bd_seguridad.seg_t_usuario WHERE correo = '${correo}' AND eliminado = '0'::"bit") 
     AND S.activo = '1'::"bit"
     AND (((DATE_PART('day', "fechaVigencia"::timestamp - NOW()::timestamp) * 24 + 
@@ -564,7 +643,8 @@ export const sendResetPassword = async (req, res) => {
     `;
       const responseSolicitudNotificacion = await pool.query(query);
       const { rows } = responseSolicitudNotificacion;
-      // Enviar email con link para reseteo de contraseña.
+
+      //3. Enviar email con link para reseteo de contraseña.
       if (rows.length > 0) {
         const cuerpoMensaje = `
 <span><strong>BYDZYNE</strong></span><br /><br />
@@ -608,7 +688,7 @@ export const getResetPassword = async (req, res) => {
     const query = `
     SELECT S.id, S."idUsuario", correo, U.nombres, U."apellidoPaterno", U."apellidoMaterno", S.activo, "fechaSolicitud", "fechaVigencia"
     FROM bd_seguridad.seg_t_usuariopwdreset S
-    INNER JOIN bd_seguridad.seg_t_usuario U ON (S."idUsuario" = U.id AND U.activo = '0'::"bit")
+    INNER JOIN bd_seguridad.seg_t_usuario U ON (S."idUsuario" = U.id AND U.eliminado = '0'::"bit")
     WHERE S.id = '${id}' AND S.activo = '1'::"bit"
     AND (((DATE_PART('day', "fechaVigencia"::timestamp - NOW()::timestamp) * 24 + 
     DATE_PART('hour', "fechaVigencia"::timestamp - NOW()::timestamp)) * 60 +
@@ -650,12 +730,11 @@ export const resetPassword = async (req, res) => {
         const query = `
         UPDATE bd_seguridad.seg_t_usuario
         SET password = MD5('${password}')
-        , activo = '1'::"bit"
         , fechaActualizacion = NOW()
         , responsableActualizacion = (
           SELECT U.correo
           FROM bd_seguridad.seg_t_usuariopwdreset S
-          INNER JOIN bd_seguridad.seg_t_usuario U ON (S."idUsuario" = U.id AND U.activo = '0'::"bit")
+          INNER JOIN bd_seguridad.seg_t_usuario U ON (S."idUsuario" = U.id AND U.activo = '1'::"bit" AND U.eliminado = '0'::"bit")
           WHERE S.id = '${id}' AND S.activo = '1'::"bit"
           AND (((DATE_PART('day', "fechaVigencia"::timestamp - NOW()::timestamp) * 24 + 
           DATE_PART('hour', "fechaVigencia"::timestamp - NOW()::timestamp)) * 60 +
@@ -670,7 +749,7 @@ export const resetPassword = async (req, res) => {
           DATE_PART('hour', "fechaVigencia"::timestamp - NOW()::timestamp)) * 60 +
           DATE_PART('minute', "fechaVigencia"::timestamp - NOW()::timestamp)) > 0) = true
         )
-        AND activo = '0'::"bit";
+        AND eliminado = '0'::"bit";
     `;
         const response = await pool.query(query);
         const queryReset = `
@@ -680,7 +759,7 @@ export const resetPassword = async (req, res) => {
         responsableactualizacion = (
           SELECT U.correo
           FROM bd_seguridad.seg_t_usuariopwdreset S
-          INNER JOIN bd_seguridad.seg_t_usuario U ON (S."idUsuario" = U.id AND U.activo = '1'::"bit")
+          INNER JOIN bd_seguridad.seg_t_usuario U ON (S."idUsuario" = U.id AND U.activo = '1'::"bit" AND U.eliminado = '0'::"bit")
           WHERE S.id = '${id}' AND S.activo = '1'::"bit"
           AND (((DATE_PART('day', "fechaVigencia"::timestamp - NOW()::timestamp) * 24 + 
           DATE_PART('hour', "fechaVigencia"::timestamp - NOW()::timestamp)) * 60 +
@@ -703,6 +782,135 @@ export const resetPassword = async (req, res) => {
         res.send(retorno);
       }
     }
+  } catch (e) {
+    res.status(400).send({
+      estado: false,
+      detalle: "Lo sentimos, ocurrio un error.",
+      retorno: e.message,
+    });
+  }
+};
+
+export const updateRequest = async (req, res) => {
+  try {
+    const token = req.headers.authorization.split(" ")[1];
+    const request = req.body;
+    const { id, idResponsable, responsable, estadoRespuesta } = request;
+    const { login, usuario, perfil } = jwt.verify(token, secret);
+    if (responsable !== login) {
+      return res.status(401).send({
+        estado: false,
+        detalle: "Inicie sesión nuevamente. Token expirado.",
+        retorno: 0,
+      });
+    }
+    const responseSolicitud = await pool.query(
+      `
+      UPDATE bd_seguridad.seg_t_usuariosolicitud
+      SET "fechaRespuesta" = NOW()
+      , "responsableRespuesta" = '${responsable}'
+      , "estadoRespuesta" = ${estadoRespuesta}
+      FROM bd_seguridad.seg_t_usuariosolicitud AS A
+      INNER JOIN bd_seguridad.seg_t_usuario AS B ON (A."idUsuario" = B."id" AND B.activo = '0'::"bit" AND B.eliminado = '1'::"bit")
+      WHERE A."idUsuario" = '${id}' AND A."idUsuarioResponsable" = '${idResponsable}'
+      AND A."fechaRespuesta" IS NULL AND A."responsableRespuesta" IS NULL AND A."estadoRespuesta" IS NULL;
+      `
+    );
+
+    if (estadoRespuesta === true) {
+      const responseUsuarioActualizado = await pool.query(
+        `
+      UPDATE bd_seguridad.seg_t_usuario
+      SET activo = '1'::"bit", eliminado = '0'::"bit"
+      , fechaActualizacion = NOW()
+      , responsableActualizacion = '${responsable}'
+      WHERE id = '${id}'
+      AND activo = '0'::"bit"
+      AND eliminado = '1'::"bit";
+      `
+      );
+    }
+
+    let query = "";
+    if (perfil === "1") {
+      // Si es Administrador se obtiene el usuario.
+      query = `SELECT U.nombres, U."apellidoPaterno", U."apellidoMaterno", U.correo
+      , P.nombres AS "nombresResponsable", P."apellidoPaterno" AS "apellidoPaternoResponsable", P."apellidoMaterno" AS "apellidoMaternoResponsable", P.correo AS "correoResponsable"
+      FROM bd_seguridad.seg_t_usuario AS U
+      INNER JOIN bd_seguridad.seg_t_usuario AS P ON (U."idResponsable" = P.id AND P."idPerfil" IN (1, 2))
+      WHERE EXISTS (
+        SELECT id FROM bd_seguridad.seg_t_usuario
+        WHERE correo = '${responsable}' AND "idPerfil" IN (1, 2)
+      )
+      AND U.id = '${id}'`;
+    } else if (perfil === "2") {
+      // Si es Supervisor se obtiene el usuario solo si este esta asociado al supervisor que realiza la consulta.
+      query = `SELECT U.nombres, U."apellidoPaterno", U."apellidoMaterno", U.correo
+      , P.nombres AS "nombresResponsable", P."apellidoPaterno" AS "apellidoPaternoResponsable", P."apellidoMaterno" AS "apellidoMaternoResponsable", P.correo AS "correoResponsable"
+      FROM bd_seguridad.seg_t_usuario AS U
+      INNER JOIN bd_seguridad.seg_t_usuario AS P ON (U."idResponsable" = P.id AND P."idPerfil" IN (1, 2))
+      WHERE EXISTS (
+        SELECT id FROM bd_seguridad.seg_t_usuario
+        WHERE correo = '${responsable}' AND "idPerfil" IN (1, 2)
+      )
+      AND U.id = '${id}' AND U."idResponsable" = '${idResponsable}'`;
+    }
+    if (estadoRespuesta === true) {
+      query += ` AND U.activo = '1'::"bit" AND U.eliminado = '0'::"bit";`;
+    }
+    if (estadoRespuesta === false) {
+      query += ` AND U.activo = '0'::"bit" AND U.eliminado = '1'::"bit";`;
+    }
+    const responseUsuario = await pool.query(query);
+    const { rows } = responseUsuario;
+
+    // Notificar de creación de accesos para la plataforma
+    if (rows.length > 0) {
+      const cuerpoMensaje =
+        estadoRespuesta === true
+          ? `
+      <span><strong>BYDZYNE</strong></span><br /><br />
+Estimado/a ${rows[0].nombres} ${rows[0].apellidoPaterno} ${rows[0].apellidoMaterno},
+<br /><br />
+¡Bienvenido/a al camino del emprendimiento!
+<br /><br />
+Su solicitud de acceso fue aprobada.
+<br /><br />
+<span><strong>Link:</strong></span> <a target='_blank' href='${baseURL}'>${webSite}</a>
+<br /><br />
+Si tienes dudas o deseas nuestro acompañamiento no dudes en contactarnos.
+<br /><br />
+Atentamente,<br />
+<span><strong>SISTEMA EQUIPO PRO</strong></span>
+      `
+          : `
+      <span><strong>BYDZYNE</strong></span><br /><br />
+Estimado/a ${rows[0].nombres} ${rows[0].apellidoPaterno} ${rows[0].apellidoMaterno},
+<br /><br />
+Su solicitud de acceso fue rechazada.
+<br /><br />
+Cualquier novedad por favor contactarse con ${rows[0].nombresResponsable} ${rows[0].apellidoPaternoResponsable} ${rows[0].apellidoMaternoResponsable}.
+<br /><br />
+Atentamente,<br />
+<span><strong>SISTEMA EQUIPO PRO</strong></span>
+      `;
+      enviar({
+        to: rows[0].correo,
+        subject: `Solicitud de Registro ${
+          estadoRespuesta === true ? "Aprobada" : "Rechazada"
+        }`,
+        html: cuerpoMensaje,
+      });
+    }
+
+    const retorno = {
+      estado: true,
+      detalle: `Solicitud ${
+        estadoRespuesta === true ? "aprobada" : "rechazada"
+      } correctamente.`,
+      retorno: rows[0],
+    };
+    res.send(retorno);
   } catch (e) {
     res.status(400).send({
       estado: false,

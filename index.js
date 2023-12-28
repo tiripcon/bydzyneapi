@@ -13,7 +13,7 @@ app.use(bodyParser.json());
 
 app.use("/users", userRoutes);
 app.use("/supervisores", supervisorRoutes);
-app.use("/catalogos", paisRoutes);
+app.use("/paises", paisRoutes);
 app.use("/perfiles", perfilRoutes);
 
 app.get("/", (req, res) => {
